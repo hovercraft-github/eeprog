@@ -59,6 +59,14 @@ void uartPrint(const char *cszString);
  */
 void uartPrintP(const char *cszString);
 
+/** Get the hex digit for the given value
+ *
+ * @param value the value to get the hext digit for
+ *
+ * @return the ASCII code for the hex digit.
+ */
+uint8_t getHexDigit(uint8_t value);
+
 /** Print an unsigned 16 bit value in hexadecimal
  *
  * Print the given value in hexadecimal format.

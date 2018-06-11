@@ -1,9 +1,28 @@
+//#ifdef CODE_BLOCKS
+#include <Arduino.h>
+//#endif // CODE_BLOCKS
+
+#ifdef ARDUINO_AVR_ATTINY84-8
+#define __AVR_ATtiny84__
+#endif
+
+#if !defined(__AVR_ATtiny84__)
+#include <extEEPROM.h>
+#include <Wire.h>
+#endif //__AVR_ATtiny84__
 #include <avr/pgmspace.h>
 #include "softuart.h"
 
-// Program banner
-#define BANNER PSTR("EEPROG V0.1\n")
 
+void* operator new(size_t size, void* ptr) {
+  return ptr;
+}
+
+// Program banner
+const char resp_identity[] PROGMEM = "EEPROG V0.1\n\0";
+#define BANNER (const __FlashStringHelper*)resp_identity
+
+#ifdef __AVR_ATtiny84__
 /** Pin definitions
  * ATMEL ATTINY84 / ARDUINO
  *
@@ -19,17 +38,33 @@
  */
 enum PINASSIGN {
   // SPI pins
-  MISO = 3,
-  MOSI = 0,
-  SCK  = 1,
-  CS   = 2,
+  MISO = 3,     // =PA3
+  MOSI = 0,     // =PA0/AREF
+  SCK  = 1,     // =PA1
+  CS   = 2,     // =PA2
+  // Power control
+  PWR_SPI = 7,  // =PA7
+  PWR_I2C = 8,  // =PB0
+  // Serial port
+  RX = 10,      // =PB2
+  TX = 9,       // =PB1
+  };
+
+#elif defined(__AVR_ATmega328P__)
+
+extEEPROM I2C_EEPROM(kbits_16, 1, 16);
+extEEPROM *g_pI2CEeprom = NULL;
+
+enum PINASSIGN {
+  // SPI pins
+  CS = SS,
   // Power control
   PWR_SPI = 7,
   PWR_I2C = 8,
-  // Serial port
-  RX = 10,
-  TX = 9,
+  // Others use default
   };
+
+#endif // __AVR_ATtiny84__
 
 //! End of line character
 #define EOL '\n'
@@ -52,8 +87,9 @@ enum PINASSIGN {
 
 /** Supported commands
  *
- * Each line received by the programmer starts with a single letter command,
- * these are what we support.
+ * Each line received by the programmer starts
+ * with a single letter command, these are what
+ * we support.
  */
 typedef enum {
   CMD_RESET = '!', //!< Reset the device, clear all settings
@@ -159,6 +195,87 @@ static uint8_t hexByte(const char *szHex) {
 // Serial communications helpers
 //---------------------------------------------------------------------------
 
+/** Initialise the UART
+ */
+void uartCmnInit() {
+#ifdef __AVR_ATtiny84__
+  uartInit();
+#else
+  // Set up serial port
+  Serial.begin(57600);
+#endif // __AVR_ATtiny84__
+}
+
+int uartCmnRead() {
+#ifdef __AVR_ATtiny84__
+  return uartRead();
+#else
+  return Serial.read();
+#endif // __AVR_ATtiny84__
+}
+
+/** Write a single character
+ *
+ * Send a single character on the UART.
+ *
+ * @param ch the character to send.
+ */
+void uartCmnWrite(uint8_t ch) {
+#ifdef __AVR_ATtiny84__
+  uartWrite(ch);
+#else
+  Serial.write(ch);
+#endif // __AVR_ATtiny84__
+}
+
+void uartCmnFormatP(const __FlashStringHelper* fmt, ...) {
+  char buff[128];
+  va_list args;
+  va_start(args, fmt);
+#ifdef __AVR_ATtiny84__
+  uartFormatP((const char *)fmt, args);
+#else
+  //vsnprintf_P(buff, sizeof(buff), (const prog_char*)fmt, args); // prog_char is depricated now
+  vsnprintf_P(buff, sizeof(buff), (const char*)fmt, args);
+  va_end(args);
+  Serial.print(buff);
+#endif // __AVR_ATtiny84__
+}
+
+/** Print a string from PROGMEM
+ *
+ * This function simply prints the nul terminated string from PROGMEM.
+ *
+ * @param cszString pointer to a character array in PROGMEM.
+ */
+void uartCmnPrintP(const __FlashStringHelper* cszString) {
+#ifdef __AVR_ATtiny84__
+  uartPrintP((const char *)cszString);
+#else
+  Serial.print(cszString);
+#endif // __AVR_ATtiny84__
+}
+
+/** Print an unsigned 16 bit value in hexadecimal
+ *
+ * Print the given value in hexadecimal format.
+ *
+ * @param pfnWriteCh pointer to a function to write individual characters
+ * @param value the value to print.
+ * @param digits the number of digits to use for display.
+ */
+void uartCmnPrintHex(uint16_t value, uint8_t digits) {
+#ifdef __AVR_ATtiny84__
+  uartPrintHex(value, digits);
+#else
+  // TODO: Should check for digit count max and min
+  while (digits) {
+    Serial.print(getHexDigit(value >> ((digits - 1) * 4)));
+    digits--;
+  }
+#endif // __AVR_ATtiny84__
+}
+
 /** Read an input line
  *
  * Reads an input line into s_szLine and converts any hex data that it finds.
@@ -167,10 +284,19 @@ static uint8_t hexByte(const char *szHex) {
  *         if the line is not valid.
  */
 static uint8_t readLine() {
+  int rd;
   uint8_t ch;
   uint8_t index = 0;
   // Read a line until EOL char
-  while((ch=uartRead())!=EOL) {
+  while ( true) {
+    rd = uartCmnRead();
+    ch = (uint8_t)(rd & 0xFF);
+    if (ch == EOL)
+      break;
+#if !defined( __AVR_ATtiny84__)
+    if (rd == EOF) // Achieve blocking behaviour
+      continue;
+#endif
     if((index>0)&&!isHex(ch))
       index = LINE_LENGTH;
     if(index<LINE_LENGTH)
@@ -210,8 +336,18 @@ static void spiSendAddress(uint32_t address) {
  * @param length the number of bytes to read
  * @param pBuffer pointer to the buffer to contain the data
  */
-void i2cReadData(uint32_t addr, uint16_t length, uint8_t *pBuffer) {
-  // TODO: Implement this
+uint8_t i2cReadData(uint32_t addr, uint16_t length, uint8_t *pBuffer) {
+#ifndef __AVR_ATtiny84__
+  uint8_t i2cStat = g_pI2CEeprom->begin(extEEPROM::twiClock400kHz);
+  if ( i2cStat != 0 ) {
+    //there was a problem
+    return i2cStat;
+  }
+  i2cStat = g_pI2CEeprom->read(addr, pBuffer, length);
+  return i2cStat;
+#else
+  return 1;
+#endif // __AVR_ATtiny84__
   }
 
 /** Write a single page to an I2C EEPROM
@@ -222,8 +358,18 @@ void i2cReadData(uint32_t addr, uint16_t length, uint8_t *pBuffer) {
  * @param addr the address in the EEPROM to write to.
  * @param pBuffer pointer to the buffer containing the data
  */
-void i2cWritePage(uint32_t addr, uint8_t *pBuffer) {
-  // TODO: Implement this
+uint8_t i2cWritePage(uint32_t addr, uint8_t *pBuffer) {
+#ifndef __AVR_ATtiny84__
+  uint8_t i2cStat = g_pI2CEeprom->begin(extEEPROM::twiClock400kHz);
+  if ( i2cStat != 0 ) {
+    //there was a problem
+    return i2cStat;
+  }
+  i2cStat = g_pI2CEeprom->write(addr, pBuffer, s_pageSize);
+  return i2cStat;
+#else
+  return 1;
+#endif // __AVR_ATtiny84__
   }
 
 /** Read data from an SPI EEPROM
@@ -303,11 +449,11 @@ static uint32_t getAddress(uint8_t *pAddr) {
  * @param success if true the previous command succeeded.
  * @param cszMessage pointer to a text message (in PROGMEM) to add to the response
  */
-void respond(bool success, const char *cszMessage) {
-  uartWrite(success?'+':'-');
+void respond(bool success, const __FlashStringHelper* cszMessage) {
+  uartCmnWrite(success?'+':'-');
   if(cszMessage)
-    uartPrintP(cszMessage);
-  uartWrite(EOL);
+    uartCmnPrintP(cszMessage);
+  uartCmnWrite(EOL);
   }
 
 /** Perform the 'init' command
@@ -319,13 +465,19 @@ void respond(bool success, const char *cszMessage) {
 static bool doInit(uint8_t data) {
   if(data!=2) {
     // Want a 16 bit value
-    respond(false, PSTR("16 bit device ID required."));
+    respond(false, F("16 bit device ID required."));
     return false;
     }
   uint16_t ident = ((uint16_t)s_szLine[1] << 8) | s_szLine[2];
   // Get the type of device
   uint16_t value = (ident & EEPROM_TYPE_MASK) >> EEPROM_TYPE_SHIFT;
   s_spi = (value == EEPROM_TYPE_SPI);
+#if defined(__AVR_ATtiny84__) || defined(__AVR_ATtiny85__)
+  if (!s_spi) {
+    respond(false, F("Sorry, I2C interface is not supported on this programmer."));
+    return false;
+  }
+#endif // defined
   // Get the size of a page (specified as bits - 1)
   value = (ident & EEPROM_PAGE_BITS_MASK) >> EEPROM_PAGE_BITS_SHIFT;
   s_pageSize = (1 << (value + 1));
@@ -338,11 +490,11 @@ static bool doInit(uint8_t data) {
   // Make sure the reserved values are 0
   value = (ident & EEPROM_RESERVED_MASK) >> EEPROM_RESERVED_SHIFT;
   if(value) {
-    respond(false, PSTR("Invalid device identifier."));
+    respond(false, F("Invalid device identifier."));
     return false;
     }
   // Respond success with some additional information.
-  uartFormatP(PSTR("+%S %uKb, %u byte page, %u byte address.\n"), s_spi?PSTR("SPI"):PSTR("I2C"), (uint16_t)(s_chipSize >> 10), s_pageSize, s_addrBytes);
+  uartCmnFormatP(F("+%S %uKb, %u byte page, %u byte address.\n"), s_spi?F("SPI"):F("I2C"), (uint16_t)(s_chipSize >> 10), s_pageSize, s_addrBytes);
   return true;
   }
 
@@ -355,30 +507,40 @@ static bool doInit(uint8_t data) {
 static bool doRead(uint8_t data) {
   // Require a 3 byte address
   if(data!=3) {
-    respond(false, PSTR("Read address required."));
+    respond(false, F("Read address required."));
     return false;
     }
   // Make sure we are in range
   uint32_t addr = getAddress(&s_szLine[1]);
   if(addr>s_chipSize) {
-    respond(false, PSTR("Address out of range."));
+    respond(false, F("Address out of range."));
     return false;
     }
   // Read the data into the buffer
   uint16_t length = ((s_chipSize - addr)<BYTES_PER_LINE)?s_chipSize - addr:BYTES_PER_LINE;
-  if(s_spi)
+  if (s_spi) {
     spiReadData(addr, length, &s_szLine[4]);
-  else
-    i2cReadData(addr, length, &s_szLine[4]);
+  } else {
+    byte ret = i2cReadData(addr, length, s_szLine + 4);
+    if (ret) {
+      //respond(false, F("i2cReadData failed."));
+      {
+        uartCmnWrite('-');
+        uartCmnPrintHex(ret, 2);
+        uartCmnWrite(EOL);
+      }
+      return false;
+    }
+  }
   // Calculate the checksum
   uint16_t check = checksum(&s_szLine[1], length + 3);
   s_szLine[length + 4] = (uint8_t)(check >> 8);
   s_szLine[length + 5] = (uint8_t)(check & 0xFF);
   // Send the response
-  uartWrite('+');
+  uartCmnWrite('+');
   for(uint16_t index=0; index<(length + 5); index++)
-    uartPrintHex(s_szLine[index + 1], 2);
-  uartWrite(EOL);
+    uartCmnPrintHex(s_szLine[index + 1], 2);
+  uartCmnWrite(EOL);
   return true;
   }
 
@@ -393,20 +555,20 @@ static bool doWrite(uint8_t data, bool first) {
   // Make sure we have enough data
   // (must be 3 byte address, at least 1 data byte and a checksum)
   if(data<6) {
-    respond(false, PSTR("Not enough data for command."));
+    respond(false, F("Not enough data for command."));
     return false;
     }
   // Verify the checksum
   uint16_t check = checksum(&s_szLine[1], data - 2);
   if(((check >> 8)!=s_szLine[data - 1])||((check & 0xff)!=s_szLine[data])) {
-    respond(false, PSTR("Invalid checksum."));
+    respond(false, F("Invalid checksum."));
     return false;
     }
   // Get and check the address
   uint32_t addr = getAddress(&s_szLine[1]);
   uint8_t length = data - 5;
   if((addr + (uint32_t)length)>s_chipSize) {
-    respond(false, PSTR("Address out of range."));
+    respond(false, F("Address out of range."));
     return false;
     }
   // On first write we do some initial set up
@@ -425,7 +587,7 @@ static bool doWrite(uint8_t data, bool first) {
     }
   // Data must be sequential
   if(addr!=(uint32_t)(s_buffBase + (uint32_t)s_buffIndex)) {
-    respond(false, PSTR("Data is not sequential."));
+    respond(false, F("Data is not sequential."));
     return false;
     }
   // Add the data to the buffer
@@ -457,7 +619,7 @@ static bool doWrite(uint8_t data, bool first) {
  */
 static bool doDone(uint8_t data) {
   if(data!=0) {
-    respond(false, PSTR("Unexpected data in command."));
+    respond(false, F("Unexpected data in command."));
     return false;
     }
   // Do we have anything left to write?
@@ -466,8 +628,7 @@ static bool doDone(uint8_t data) {
     if(s_spi) {
       spiReadData(s_buffBase + s_buffIndex, s_pageSize - s_buffIndex, &s_buffer[s_buffIndex]);
       spiWritePage(s_buffBase, s_buffer);
-      }
-    else {
+    } else {
       i2cReadData(s_buffBase + s_buffIndex, s_pageSize - s_buffIndex, &s_buffer[s_buffIndex]);
       i2cWritePage(s_buffBase, s_buffer);
       }
@@ -494,13 +655,19 @@ void setup() {
   digitalWrite(PWR_SPI, LOW);
   pinMode(PWR_I2C, OUTPUT);
   digitalWrite(PWR_I2C, LOW);
+
+#ifdef __AVR_ATtiny84__
   // Disable Timer0 interrupts
   TIMSK0 = 0;
+#endif // __AVR_ATtiny84__
+
   // Set up serial port
-  uartInit();
+  uartCmnInit();
+
   // Enter waiting mode
-  uartPrintP(BANNER);
   s_mode = MODE_WAITING;
+  uartCmnPrintP(BANNER);
+
   }
 
 /** Main program loop
@@ -508,15 +675,14 @@ void setup() {
 void loop() {
   uint8_t data = readLine();
   if(data==0xFF) // Invalid line
-    respond(false, PSTR("Unrecognised command."));
+    respond(false, F("Unrecognised command."));
   else if(s_szLine[0]==CMD_RESET) {
     // Reset module
     s_mode = MODE_WAITING;
     digitalWrite(PWR_SPI, LOW);
     digitalWrite(PWR_I2C, LOW);
-    uartPrintP(BANNER);
-    }
-  else {
+    uartCmnPrintP(BANNER);
+  } else {
     if(s_mode==MODE_WAITING) {
       if(s_szLine[0]==CMD_INIT) {
         // Initialise device
@@ -524,33 +690,37 @@ void loop() {
           // Power on the selected device
           digitalWrite(s_spi?PWR_SPI:PWR_I2C, HIGH);
           s_mode = MODE_READY;
+          /*extEEPROM I2C_EEPROM(kbits_16, 1, 16);
+          extEEPROM *g_pI2CEeprom = NULL;*/
+          if (!s_spi) { // i.e. i2c
+#ifndef __AVR_ATtiny84__
+            //uartFormatP(F("+%S %uKb, %u byte page, %u byte address.\n"), s_spi?F("SPI"):F("I2C"),
+//                          (uint16_t)(s_chipSize >> 10), s_pageSize, s_addrBytes);
+            uint16_t chip_size_kbit = (uint16_t)(s_chipSize * 8 >> 10);
+            g_pI2CEeprom = new (&I2C_EEPROM) extEEPROM((eeprom_size_t)chip_size_kbit, 1, s_pageSize);
+#endif // __AVR_ATtiny84__
           }
         }
-      else
-        respond(false, PSTR("Command invalid for mode."));
-      }
-    else if(s_mode==MODE_READY) {
+      } else
+        respond(false, F("Command invalid for mode."));
+    } else if (s_mode == MODE_READY) {
       if(s_szLine[0]==CMD_READ)
         doRead(data);
       else if(s_szLine[0]==CMD_WRITE) {
         if(doWrite(data, true))
           s_mode = MODE_WRITING;
-        }
-      else
-        respond(false, PSTR("Command invalid for mode."));
-      }
-    else if(s_mode==MODE_WRITING) {
+      } else
+        respond(false, F("Command invalid for mode."));
+    } else if (s_mode == MODE_WRITING) {
       if(s_szLine[0]==CMD_WRITE)
         doWrite(data, false);
       else if(s_szLine[0]==CMD_DONE) {
         if(doDone(data))
           s_mode = MODE_READY;
-        }
-      else
-        respond(false, PSTR("Command invalid for mode."));
-      }
-    else
-      respond(false, PSTR("Firmware fault, invalid mode."));
+      } else
+        respond(false, F("Command invalid for mode."));
+    } else
+      respond(false, F("Firmware fault, invalid mode."));
     }
   }
 

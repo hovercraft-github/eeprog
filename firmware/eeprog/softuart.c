@@ -65,6 +65,7 @@ void uartInit() {
  * @param ch the character to send.
  */
 void __attribute__ ((noinline)) uartWrite(uint8_t ch) {
+#ifdef __AVR_ATtiny84__
   // Set to output state and bring high
   PORTB |= (1 << UART_TX);
   cli();
@@ -94,6 +95,7 @@ void __attribute__ ((noinline)) uartWrite(uint8_t ch) {
       [ch] "r" (ch)
     : "r0","r28","r29","r30");
   sei();
+#endif // __AVR_ATtiny84__
   }
 
 /** Receive a single character
@@ -104,6 +106,7 @@ void __attribute__ ((noinline)) uartWrite(uint8_t ch) {
  */
 uint8_t __attribute__ ((noinline)) uartRead() {
   uint8_t ch;
+#ifdef __AVR_ATtiny84__
   // Set as input and disable pullup
   DDRB  &= ~(1 << UART_RX);
   PORTB &= ~(1 << UART_RX);
@@ -135,6 +138,7 @@ uint8_t __attribute__ ((noinline)) uartRead() {
       [rxdelay2] "I" (RXDELAY2)
     : "r0","r18","r19");
   sei();
+#endif // __AVR_ATtiny84__
   return ch;
   }
 
@@ -169,7 +173,7 @@ void uartPrintP(const char *cszString) {
  *
  * @return the ASCII code for the hex digit.
  */
-static uint8_t getHexDigit(uint8_t value) {
+uint8_t getHexDigit(uint8_t value) {
   value = value & 0x0F;
   if(value<10)
     return '0' + value;
